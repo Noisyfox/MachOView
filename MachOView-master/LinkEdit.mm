@@ -304,6 +304,7 @@ using namespace std;
   MATCH_STRUCT(mach_header_64,imageOffset);
   
   struct relocation_info const * prev_relocation_info = NULL;
+    uint32_t previous_addend = 0;
   
   for (uint32_t nreloc = 0; nreloc < length / sizeof(struct relocation_info); ++nreloc)
   {
@@ -317,6 +318,9 @@ using namespace std;
     
     uint32_t relocLength = (1 << relocation_info->r_length);
     NSAssert1(relocLength == sizeof(uint32_t) || relocLength == sizeof(uint64_t), @"unsupported reloc length (%u)", relocLength);
+
+      uint32_t previousAddend = previous_addend;
+      previous_addend = 0;
     
     // accumulate search info
     NSUInteger bookmark = node.details.rowCount;
@@ -434,17 +438,77 @@ using namespace std;
         
         if (relocLength == sizeof(uint32_t))
         {
+            uint32_t relocAddend = [dataController read_uint32:rangeReloc];
+            
+            if (mach_header_64->cputype == CPU_TYPE_ARM64) {
+                if (relocation_info->r_type == ARM64_RELOC_PAGE21 || relocation_info->r_type == ARM64_RELOC_GOT_LOAD_PAGE21) {
+                    NSParameterAssert(relocation_info->r_pcrel == true);
+                    uint32_t instruction = relocAddend;
+                    relocAddend = ((relocAddend & 0x60000000) >> 29) | ((relocAddend & 0x01FFFFE0) >> 3);
+                    relocAddend *= 4096; // internally addend is in bytes, so scale
+                    if (relocAddend != 0) {
+                        NSParameterAssert(relocation_info->r_type != ARM64_RELOC_GOT_LOAD_PAGE21);
+                        if (previousAddend != 0) {
+                            [NSException raise:@"Addend"
+                                        format:@"Both embedded addend and ARM64_RELOC_ADDEND used"];
+                        }
+                    } else {
+                        relocAddend = previousAddend;
+                    }
+                    
+                    // update real data
+                    uint32_t relocValue = nlist_64->n_value - relocation_info->r_address - baseAddress - relocLength;
+                    relocValue += relocAddend;
+                    relocValue /= 4096;
+                    uint32_t immHi = (relocValue >> 2) & 0x7FFFF;
+                    uint32_t immLo = relocValue & 0x3;
+                    instruction = (relocAddend & 0x9F00001F) | (immHi << 3) | (immLo << 29);
+                    [self addRelocAtFileOffset:relocLocation withLength:relocLength andValue:instruction];
+                } else if (relocation_info->r_type == ARM64_RELOC_PAGEOFF12 || relocation_info->r_type == ARM64_RELOC_GOT_LOAD_PAGEOFF12) {
+                    NSParameterAssert(relocation_info->r_pcrel == false);
+                    uint32_t instruction = relocAddend;
+                    relocAddend = ((relocAddend & 0x003FFC00) >> 10);
+                    if (relocAddend != 0) {
+                        NSParameterAssert(relocation_info->r_type != ARM64_RELOC_GOT_LOAD_PAGEOFF12);
+                        if (previousAddend != 0) {
+                            [NSException raise:@"Addend"
+                                        format:@"Both embedded addend and ARM64_RELOC_ADDEND used"];
+                        }
+                    } else {
+                        relocAddend = previousAddend;
+                    }
+                    uint32_t relocValue = nlist_64->n_value;
+                    relocValue += relocAddend;
+                    instruction = (instruction & ~0x003FFC00) | ((relocValue & 0xFFF) << 10);
+                    [self addRelocAtFileOffset:relocLocation withLength:relocLength andValue:instruction];
+                } else {
+                    // 32bit signed PC Rel
+                    NSParameterAssert(relocation_info->r_pcrel == true);
+                    
+                    // update real data
+                    uint32_t relocValue = nlist_64->n_value - relocation_info->r_address - baseAddress - relocLength;
+                    relocValue += relocAddend;
+                    [self addRelocAtFileOffset:relocLocation withLength:relocLength andValue:relocValue];
+                }
+                
+                if (relocAddend != 0)
+                {
+                  [node.details appendRow:@"":@"":@"Addend"
+                                         :(int32_t)relocAddend < 0
+                                          ? [NSString stringWithFormat:@"-0x%X",-relocAddend]
+                                          : [NSString stringWithFormat:@"0x%X",relocAddend]];
+                }
+            } else {
           // 32bit signed PC Rel
           NSParameterAssert(relocation_info->r_pcrel == true);
           uint32_t relocValue = nlist_64->n_value - relocation_info->r_address - baseAddress - relocLength;
-          uint32_t relocAddend = [dataController read_uint32:rangeReloc];
 
-          if (mach_header_64->cputype == CPU_TYPE_X86_64)
-          {
+//          if (mach_header_64->cputype == CPU_TYPE_X86_64)
+//          {
             relocAddend -= (relocation_info->r_type == X86_64_RELOC_SIGNED_1 ? 1 :
                                    relocation_info->r_type == X86_64_RELOC_SIGNED_2 ? 2 :
                                    relocation_info->r_type == X86_64_RELOC_SIGNED_4 ? 4 : 0);
-          }
+//          }
           
           if (relocAddend != 0)
           {
@@ -458,6 +522,7 @@ using namespace std;
           relocValue += relocAddend;
           [self addRelocAtFileOffset:relocLocation withLength:relocLength andValue:relocValue];
           //NSLog(@"local32: %@ %.16qX --> (%u) %@",[self findSectionContainsRVA64:[self fileOffsetToRVA64:relocLocation]],[self fileOffsetToRVA64:relocLocation],relocLength,[self findSymbolAtRVA64:relocValue]);
+            }
         }
         else if (relocLength == sizeof(uint64_t))
         {
@@ -537,19 +602,6 @@ using namespace std;
     }
     else // r_symbolnum means section index
     {
-      // section relative (symbolNum means sectionNum)
-      if (relocation_info->r_symbolnum >= sections_64.size())
-      {
-        [NSException raise:@"Section"
-                    format:@"index is out of range %u", relocation_info->r_symbolnum];
-      }
-      
-      struct section_64 const * section_64 = [self getSection64ByIndex:relocation_info->r_symbolnum];
-      
-      NSString * sectionName = [NSString stringWithFormat:@"(%s,%s)", 
-                                string(section_64->segname,16).c_str(),
-                                string(section_64->sectname,16).c_str()];
-      
       if (relocation_info->r_symbolnum == R_ABS)
       {
         // absolute address
@@ -560,6 +612,30 @@ using namespace std;
       }
       else
       {
+          if (mach_header_64->cputype == CPU_TYPE_ARM64 && relocation_info->r_type == ARM64_RELOC_ADDEND) {
+              // For RELOC_ADDEND, the r_symbolnum field stores the addend for next relocation
+              uint32_t relocAddend = relocation_info->r_symbolnum;
+              [node.details appendRow:[NSString stringWithFormat:@"%.8lX", range.location]
+                                     :lastReadHex
+                                     :@"Addend"
+                                     :(int64_t)relocAddend < 0
+                                      ? [NSString stringWithFormat:@"-0x%qX",-relocAddend]
+                                      : [NSString stringWithFormat:@"0x%qX",relocAddend]];
+              previous_addend = relocAddend;
+          } else {
+              // section relative (symbolNum means sectionNum)
+              if (relocation_info->r_symbolnum >= sections_64.size())
+              {
+                [NSException raise:@"Section"
+                            format:@"index is out of range %u", relocation_info->r_symbolnum];
+              }
+              
+        struct section_64 const * section_64 = [self getSection64ByIndex:relocation_info->r_symbolnum];
+          
+        NSString * sectionName = [NSString stringWithFormat:@"(%s,%s)",
+                                  string(section_64->segname,16).c_str(),
+                                  string(section_64->sectname,16).c_str()];
+
         [node.details appendRow:[NSString stringWithFormat:@"%.8lX", range.location]
                                :lastReadHex
                                :@"Section"
@@ -631,6 +707,7 @@ using namespace std;
 
         //NSLog(@"%@ %.16qX --> (%u) %@",[self findSectionContainsRVA64:[self fileOffsetToRVA64:relocLocation]],[self fileOffsetToRVA64:relocLocation],relocLength,[self findSymbolAtRVA64:relocValue]);
       }
+    }
     }
     //========== end of differentation 
     
