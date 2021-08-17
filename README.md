@@ -2,6 +2,14 @@
 
 该工程是建立在[轮子](https://github.com/gdbinit/MachOView)上的，感谢作者的贡献，遗憾的源工程无法直接编译，这边自己维护了下。
 
+## v2.6.2 更新内容
+- 增加 `ARM64_RELOC_PAGE21` `ARM64_RELOC_PAGEOFF12` 和 `ARM64_RELOC_ADDEND` 支持
+- 增加对 `LC_VERSION_MIN_TVOS` `LC_VERSION_MIN_WATCHOS` `LC_BUILD_VERSION` 和 `LC_NOTE` 支持
+- Add support of `ARM64_RELOC_PAGE21` `ARM64_RELOC_PAGEOFF12` and `ARM64_RELOC_ADDEND`
+- Add support of Load Command `LC_VERSION_MIN_TVOS` `LC_VERSION_MIN_WATCHOS` `LC_BUILD_VERSION` and `LC_NOTE`
+
+[2.6.2zip](https://github.com/noisyfox/MachOView/releases/tag/2.6.2)
+
 ## v2.6.1 更新内容
 
 增加`Symbol Table `和`Dynamic Symbol Table`和`String Table` 的索引值以及十进制表示值，方便查找内容
